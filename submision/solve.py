@@ -7,14 +7,16 @@ from sklearn.neighbors import KNeighborsRegressor
 
 from collections import defaultdict
 
+import catboost
 
 
-USE_NAIVE = False
 GROUP_ALS_DIM = 32
 FRIEND_ALS_DIM = 16
 ALS_TRAIN_GROUPS_TH = 1  # 5 is worse that 1
 GROUP_OVER_FRIEND_WEIGHT = 0.75
 ALS_OVER_NAIVE_WEIGHT = 0.75
+NAIVE_OVER_CB_WEIGHT = 0.75
+FRIEND_ALS_OVER_CB_WEIGHT = 0.5
 
 ### SET VARIABLES
 
@@ -56,6 +58,12 @@ train_friends_2_emb = {g: e for g,e in zip(train_friends, train_friend_als_frien
 friend_knn = KNeighborsRegressor(weights='distance', n_neighbors=25)
 friend_knn.fit(train_friend_als_user_embeddings, train_uids['age'].values)
 
+edu_cb_model_v1 = catboost.CatBoost().load_model('data/edu_v1.cbm')
+edu_cb_model_v2 = catboost.CatBoost().load_model('data/edu_v2.cbm')
+
+user_embs_for_friend_knn = None
+ids_order = None
+
 ### END UPLOAD TRAIN DATA
 
 def write_csv(df: pd.DataFrame, output: str):
@@ -86,22 +94,69 @@ def decision(
     groups: list,
     friends: list,
     group_als_prediction: float,
-    friend_als_prediction: float
+    friend_als_prediction: float,
+    cb_v1_prediction: float,
+    cb_v2_prediction: float
 ) -> float:
     naive = decision_naive_impl(school, register, g5)
-    if USE_NAIVE:
-        return naive
+    base = naive * NAIVE_OVER_CB_WEIGHT + (1 - NAIVE_OVER_CB_WEIGHT) * cb_v1_prediction
 
     groups = filter_train_seq(groups, train_groups_set)
     friends = filter_train_seq(friends, train_friends_set)
+
+    friend_als_prediction = friend_als_prediction * FRIEND_ALS_OVER_CB_WEIGHT + (1 - FRIEND_ALS_OVER_CB_WEIGHT) * cb_v2_prediction
+
     if len(groups) < ALS_TRAIN_GROUPS_TH and len(friends) < ALS_TRAIN_GROUPS_TH:
-        return naive
+        return base
     if len(groups) < ALS_TRAIN_GROUPS_TH:
-        return friend_als_prediction * ALS_OVER_NAIVE_WEIGHT + (1 - ALS_OVER_NAIVE_WEIGHT) * naive
+        return friend_als_prediction * ALS_OVER_NAIVE_WEIGHT + (1 - ALS_OVER_NAIVE_WEIGHT) * base
     if len(friends) < ALS_TRAIN_GROUPS_TH:
-        return group_als_prediction * ALS_OVER_NAIVE_WEIGHT + (1 - ALS_OVER_NAIVE_WEIGHT) * naive
+        return group_als_prediction * ALS_OVER_NAIVE_WEIGHT + (1 - ALS_OVER_NAIVE_WEIGHT) * base
     return group_als_prediction * GROUP_OVER_FRIEND_WEIGHT + (1 - GROUP_OVER_FRIEND_WEIGHT) * friend_als_prediction
 
+
+def make_common_features(edu: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> tuple:
+    edu_features = []
+    edu_ids = edu['uid']
+    for x in edu.iterrows():
+        x = x[1]
+        uid = x['uid']
+        get_2000 = lambda name: x[name] - 2000 if not np.isnan(x[name]) else 0
+        make_ind = lambda name: float(np.isnan(x[name]))
+        features_ind = [make_ind('school_education')]
+        for i in range(1, 8):
+            features_ind.append(make_ind('graduation_{}'.format(i)))
+        features = [get_2000('school_education')]
+        for i in range(1, 8):
+            features.append(get_2000('graduation_{}'.format(i)))
+        features.append(len(friends[uid]))
+        features.append(len(groups[uid]))
+        f = features_ind + features
+        edu_features.append(f)
+    return edu_ids, np.array(edu_features)
+
+def get_als_friends_embed(uid: int) -> np.array:
+    return user_embs_for_friend_knn[ids_order[uid]]
+
+def make_common_features_v2(edu: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> tuple:
+    edu_features = []
+    edu_ids = edu['uid']
+    for x in edu.iterrows():
+        x = x[1]
+        uid = x['uid']
+        get_2000 = lambda name: x[name] - 2000 if not np.isnan(x[name]) else 0
+        make_ind = lambda name: float(np.isnan(x[name]))
+        features_ind = [make_ind('school_education')]
+        for i in range(1, 8):
+            features_ind.append(make_ind('graduation_{}'.format(i)))
+        features = [get_2000('school_education')]
+        for i in range(1, 8):
+            features.append(get_2000('graduation_{}'.format(i)))
+        features.append(len(friends[uid]))
+        features.append(len(groups[uid]))
+        f = features_ind + features + list(get_als_friends_embed(uid))
+        edu_features.append(f)
+    return edu_ids, np.array(edu_features)
 
 
 def decision_naive_impl(school: float, register: float, g5: float) -> float:
@@ -126,17 +181,32 @@ def calc_group_als_vectorized(ids: np.array, groups: defaultdict) -> np.array:
     return group_knn.predict(user_embs_for_group_knn).reshape(-1)
 
 def calc_friend_als_vectorized(ids: np.array, friends: defaultdict) -> np.array:
+    global user_embs_for_friend_knn
     user_embs_for_friend_knn = np.array([calc_user_embed_by_train_seq(
         filter_train_seq(friends[_id], train_friends_set), FRIEND_ALS_DIM, train_friends_2_emb) for _id in ids])
     return friend_knn.predict(user_embs_for_friend_knn).reshape(-1)
+
+def apply_cb_model_v1(ids: np.array, education: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> np.array:
+    common_uids, features = make_common_features(education, groups, friends)
+    approxes = edu_cb_model_v1.predict(features)
+    uid2approx = {u:a for u, a in zip(common_uids, approxes)}
+    return np.array([uid2approx[u] for u in ids])
+
+def apply_cb_model_v2(ids: np.array, education: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> np.array:
+    common_uids, features = make_common_features_v2(education, groups, friends)
+    approxes = edu_cb_model_v2.predict(features)
+    uid2approx = {u:a for u, a in zip(common_uids, approxes)}
+    return np.array([uid2approx[u] for u in ids])
 
 def make_raw_predictions(ids: pd.DataFrame, education: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> pd.DataFrame:
     result = pd.DataFrame()
     result['uid'] = ids['uid']
     result['group-als'] = calc_group_als_vectorized(ids['uid'].values, groups)
     result['friend-als'] = calc_friend_als_vectorized(ids['uid'].values, friends)
-    assert result.shape[0] == ids.shape[0] and result.shape[1] == 3
-    assert ['uid', 'group-als', 'friend-als'] == list(result.columns)
+    result['edu-cb-v1'] = apply_cb_model_v1(ids['uid'].values, education, groups, friends)
+    result['edu-cb-v2'] = apply_cb_model_v2(ids['uid'].values, education, groups, friends)
+    assert result.shape[0] == ids.shape[0] and result.shape[1] == 5
+    assert ['uid', 'group-als', 'friend-als', 'edu-cb-v1', 'edu-cb-v2'] == list(result.columns)
     return result
 
 
@@ -148,10 +218,13 @@ def make_predictions(ids: pd.DataFrame, education: pd.DataFrame, groups: pd.Data
     friends_list = defaultdict(list)
     for uid, fuid in zip(friends['uid'].values, friends['fuid'].values):
         friends_list[uid].append(fuid)
+        friends_list[fuid].append(uid)
 
     raw_predictions = make_raw_predictions(ids, education, groups_list, friends_list)
     user_2_group_als_prediction = {uid: r for uid, r in zip(raw_predictions['uid'], raw_predictions['group-als'])}
     user_2_friend_als_prediction = {uid: r for uid, r in zip(raw_predictions['uid'], raw_predictions['friend-als'])}
+    user_2_cb_v1_prediction = {uid: r for uid, r in zip(raw_predictions['uid'], raw_predictions['edu-cb-v1'])}
+    user_2_cb_v2_prediction = {uid: r for uid, r in zip(raw_predictions['uid'], raw_predictions['edu-cb-v2'])}
 
     result = pd.DataFrame()
     result['uid'] = ids['uid']
@@ -168,7 +241,9 @@ def make_predictions(ids: pd.DataFrame, education: pd.DataFrame, groups: pd.Data
         groups_list[uid],
         friends_list[uid],
         user_2_group_als_prediction[uid],
-        user_2_friend_als_prediction[uid]
+        user_2_friend_als_prediction[uid],
+        user_2_cb_v1_prediction[uid],
+        user_2_cb_v2_prediction[uid]
     ) for uid in result['uid'].values]
     assert result.shape[0] == ids.shape[0] and result.shape[1] == 2
     assert ['uid', 'age'] == list(result.columns)
@@ -176,7 +251,9 @@ def make_predictions(ids: pd.DataFrame, education: pd.DataFrame, groups: pd.Data
 
 
 def main(model: str, input: str, output: str):
+    global ids_order
     ids = read_csv(os.path.join(input, TEST))
+    ids_order = {uid: i for i, uid in enumerate(ids['uid'].values)}
     education = read_csv(os.path.join(input, EDUCATION))
     groups = read_csv(os.path.join(input, GROUPS))
     friends = read_csv(os.path.join(input, FRIENDS))

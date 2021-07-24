@@ -6,6 +6,7 @@ __pycache__/
 *.csv
 *.tsv
 *.DS_Store
+*catboost_info*
 
 # C extensions
 *.so
