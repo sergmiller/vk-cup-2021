@@ -1,6 +1,7 @@
 FROM ubuntu:16.04
 FROM python:3.7
 
+COPY data data
 COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
 
