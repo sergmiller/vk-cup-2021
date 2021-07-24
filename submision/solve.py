@@ -11,6 +11,7 @@ from collections import defaultdict
 
 USE_NAIVE = False
 ALS_DIM = 32
+ALS_TRAIN_GROUPS_TH = 1  # 5 is worse that 1
 
 ### SET VARIABLES
 
@@ -65,20 +66,12 @@ def calc_user_embed_by_train_groups(groups: list) -> np.array:
     return e / len(groups)
 
 
-def decision_als(uid: int, groups: list, school: float, register: float) -> float:
+def decision(uid: int, school: float, register: float, groups: list, group_als_prediction: float) -> float:
     groups = filter_train_groups(groups)
-    if len(groups) == 0:
+    if USE_NAIVE or len(groups) < ALS_TRAIN_GROUPS_TH:
         return decision_naive_impl(school, register)
-    e = calc_user_embed_by_train_groups(groups)
-    r = knn.predict([e])
-    r = float(r)
-    return r
+    return group_als_prediction
 
-
-def decision(uid: int, school: float, register: float, groups: list) -> float:
-    if USE_NAIVE:
-        return decision_naive_impl(school, register)
-    return decision_als(uid, groups, school, register)
 
 def decision_naive_impl(school: float, register: float) -> float:
     if np.isnan(school):
@@ -90,18 +83,33 @@ def decision_naive_impl(school: float, register: float) -> float:
     return r
 
 
+def calc_group_als_vectorized(ids: np.array, groups: defaultdict) -> np.array:
+    user_embs_for_knn = np.array([calc_user_embed_by_train_groups(filter_train_groups(groups[_id])) for _id in ids])
+    return knn.predict(user_embs_for_knn).reshape(-1)
+
+def make_raw_predictions(ids: pd.DataFrame, education: pd.DataFrame, groups: defaultdict) -> pd.DataFrame:
+    result = pd.DataFrame()
+    result['uid'] = ids['uid']
+    result['group-als'] = calc_group_als_vectorized(ids['uid'].values, groups)
+    assert result.shape[0] == ids.shape[0] and result.shape[1] == 2
+    assert ['uid', 'group-als'] == list(result.columns)
+    return result
+
+
 def make_predictions(ids: pd.DataFrame, education: pd.DataFrame, groups: pd.DataFrame) -> pd.DataFrame:
+    groups_list = defaultdict(list)
+    for uid, gid in zip(groups['uid'].values, groups['gid'].values):
+        groups_list[uid].append(gid)
+    raw_predictions = make_raw_predictions(ids, education, groups_list)
+    user_2_group_als_prediction = {uid: r for uid, r in zip(raw_predictions['uid'], raw_predictions['group-als'])}
+
     result = pd.DataFrame()
     result['uid'] = ids['uid']
 
     school = {uid : year for uid, year in zip(education['uid'].values, education['school_education'].values)}
     register = {uid : year for uid, year in zip(ids['uid'].values, ids['registered_year'].values)}
 
-    groups_list = defaultdict(list)
-    for uid, gid in zip(groups['uid'].values, groups['gid'].values):
-        groups_list[uid].append(gid)
-
-    result['age'] = [decision(uid, school[uid], register[uid], groups_list[uid]) for uid in result['uid'].values]
+    result['age'] = [decision(uid, school[uid], register[uid], groups_list[uid], user_2_group_als_prediction[uid]) for uid in result['uid'].values]
     assert result.shape[0] == ids.shape[0] and result.shape[1] == 2
     assert ['uid', 'age'] == list(result.columns)
     return result
