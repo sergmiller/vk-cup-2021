@@ -25,8 +25,8 @@ ALS_OVER_NAIVE_WEIGHT = 0 # less is overfit
 FULL_ALS_OVER_CB_WEIGHT = 0.5
 FULL_ALS_OVER_BASE_WEIGHT = 0
 
-COMMON_SLICE_LEN = 8 + 8 + 2 + 1 + 1
-FORBIDEN_TAIL_OF_COMMON_SLICE_LEN = 1
+COMMON_SLICE_LEN = 8 + 8 + 2 + 1 + 2
+FORBIDEN_TAIL_OF_COMMON_SLICE_LEN = 2
 CB_V1_FEATURE_SLICE = list(np.arange(COMMON_SLICE_LEN + GEMBEDDINGS_DIM))
 CB_V1_5_FEATURE_SLICE = CB_V1_FEATURE_SLICE + list(np.arange(FRIEND_ALS_DIM) + COMMON_SLICE_LEN + GEMBEDDINGS_DIM)
 CB_V2_FEATURE_SLICE = list(np.arange(COMMON_SLICE_LEN - FORBIDEN_TAIL_OF_COMMON_SLICE_LEN)) + list(np.arange(FRIEND_ALS_DIM) + COMMON_SLICE_LEN + GEMBEDDINGS_DIM)
@@ -81,17 +81,27 @@ friends_2_user_emb = {g: e for g,e in zip(train_friends, friend_als_user_embeddi
 friend_knn = KNeighborsRegressor(weights='distance', n_neighbors=25)
 friend_knn.fit(train_friend_als_user_embeddings, train_uids['age'].values)
 
+def load_mean(a: np.array) -> dict:
+    return {x:y for x,y in a}
+
+
+g_mean = load_mean(read_csv('data/g_mean_p35_a10.csv').values)
+f_mean = load_mean(read_csv('data/f_mean.csv').values)
+
 user_g_nodes = read_csv('data/graph_nodes_user_ids.csv').values
 gembeddings = read_csv('data/graph_embeddings.csv').values
+# meta_pseudo = read_csv('data/meta_pseudo.csv').values.reshape(-1)
+# print(meta_pseudo)
 uid2gembeddding = {int(uid): gembeddings[i] for i, uid in enumerate(user_g_nodes)}
+# uid2meta_pseudo = {int(uid): meta_pseudo[i] for i, uid in enumerate(user_g_nodes)}
 
-edu_cb_model_v1 = catboost.CatBoost().load_model('data/edu_v1_g_y.cbm')
-edu_cb_model_v1_5 = catboost.CatBoost().load_model('data/edu_v1_5_g_y.cbm')
+edu_cb_model_v1 = catboost.CatBoost().load_model('data/edu_v1_g_y_mmg_p35_a10.cbm')
+# edu_cb_model_v1_5 = catboost.CatBoost().load_model('data/edu_v1_5_g_y.cbm')
 edu_cb_model_v2 = catboost.CatBoost().load_model('data/edu_v2_g_10K.cbm')
 edu_cb_model_v3 = catboost.CatBoost().load_model('data/edu_v3_g_10K.cbm')
 
 assert len(CB_V1_FEATURE_SLICE) == len(edu_cb_model_v1.feature_names_)
-assert len(CB_V1_5_FEATURE_SLICE) == len(edu_cb_model_v1_5.feature_names_)
+# assert len(CB_V1_5_FEATURE_SLICE) == len(edu_cb_model_v1_5.feature_names_)
 assert len(CB_V2_FEATURE_SLICE) == len(edu_cb_model_v2.feature_names_)
 assert len(CB_V3_FEATURE_SLICE) == len(edu_cb_model_v3.feature_names_)
 
@@ -118,8 +128,36 @@ class MultiheadCatboostModel:
 user_embs_for_friend_knn = None
 user_embs_for_group_knn = None
 ids_order = None
+uid2mmg = None
+
+
 
 ### END UPLOAD TRAIN DATA
+
+def calc_mean_of_mean_of_groups(uids: pd.DataFrame, groups: pd.DataFrame, g_mean: dict) -> dict:
+    u2f = dict()
+    g_list = defaultdict(list)
+    for uid, guid in zip(groups['uid'].values, groups['gid'].values):
+        g_list[uid].append(guid)
+    for u in g_list.keys():
+        verified_groups = [g for g in g_list[u] if g in g_mean]
+        if len(verified_groups) == 0:
+            continue
+        u2f[u] = np.mean([g_mean[v] for v in verified_groups])
+    return u2f
+
+def calc_mean_of_mean_of_friends(uids: pd.DataFrame, friends: pd.DataFrame, f_mean: dict) -> dict:
+    u2f = dict()
+    f_list = defaultdict(list)
+    for uid, fid in zip(friends['uid'].values, friends['fuid'].values):
+        f_list[uid].append(fid)
+        f_list[fid].append(uid)
+    for u in f_list.keys():
+        verified_friends = [f for f in f_list[u] if f in f_mean]
+        if len(verified_friends) == 0:
+            continue
+        u2f[u] = np.mean([f_mean[v] for v in verified_friends])
+    return u2f
 
 def write_csv(df: pd.DataFrame, output: str):
     df.to_csv(output, index=None, index_label=None)
@@ -171,6 +209,8 @@ def decision(
     # base = naive * NAIVE_OVER_CB_WEIGHT + (1 - NAIVE_OVER_CB_WEIGHT) * cb_v1_prediction
     base = cb_v1_prediction
 
+    # return uid2mmg.get(uid, 35)
+
     return base
 
     # groups = filter_train_seq(groups, train_groups_set)
@@ -208,11 +248,22 @@ def get_friends_mean_embed(uid: int, friends_list: list)-> np.array:
     f_cache[uid] = e
     return e
 
-def make_common_features_v3(uids: pd.DataFrame, edu: pd.DataFrame, friends_df: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> tuple:
+def make_common_features_v3(
+        uids: pd.DataFrame,
+        edu: pd.DataFrame,
+        friends_df: pd.DataFrame,
+        groups_df: pd.DataFrame,
+        groups: defaultdict,
+        friends: defaultdict
+) -> tuple:
+    global uid2mmg
     friends_pr = calc_friends_pagerank(friends_df)
     edu_features = []
     edu_ids = edu['uid']
     uid2register = {u:r for u,r in zip(uids['uid'].values, uids['registered_year'].values)}
+
+    uid2mmg = calc_mean_of_mean_of_groups(uids, groups_df, g_mean)
+    uid2mmf = calc_mean_of_mean_of_friends(uids, friends_df, f_mean)
     for x in edu.iterrows():
         x = x[1]
         uid = int(x['uid'])
@@ -228,40 +279,46 @@ def make_common_features_v3(uids: pd.DataFrame, edu: pd.DataFrame, friends_df: p
         features.append(len(friends[uid]))
         features.append(len(groups[uid]))
         features.append(friends_pr[uid])
+
         features.append(register_year)
+        features.append(uid2mmg.get(uid, 35))
+        # features.append(uid2mmf.get(uid, 35))
+        # features.append(uid2meta_pseudo.get(uid, 0))
         # features.append(decision_naive_impl(x['school_education'], register_year, x['graduation_5']))
         f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(GEMBEDDINGS_DIM))) + list(get_als_friends_embed(uid)) + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
         edu_features.append(f)
     return edu_ids, np.array(edu_features)
 
 #
-def decision_naive_impl(school: float, register: float, g5: float) -> float:
-    if np.isnan(school):
-        if np.isnan(g5):
-            r = 697.208 - 0.32883 * register  # LM approx 35
-        else:
-            r = 1287.602 + 0.26818 * register - 0.89101 * g5  # LM approx register and graduation_5
-    else:
-        if np.isnan(g5):
-            r = 1918.977 - 0.05583 * register - 0.88422 * school  # LM approx 2021 - school + 18 + Residual(register)
-        else:
-            r = 1821.079 + 0.06561 * register - 0.82946 * school - 0.12747 * g5  # LM approx all available params
-    r = max(14, r)
-    r = min(89, r)
-    return r
+# def decision_naive_impl(school: float, register: float, g5: float) -> float:
+#     if np.isnan(school):
+#         if np.isnan(g5):
+#             r = 697.208 - 0.32883 * register  # LM approx 35
+#         else:
+#             r = 1287.602 + 0.26818 * register - 0.89101 * g5  # LM approx register and graduation_5
+#     else:
+#         if np.isnan(g5):
+#             r = 1918.977 - 0.05583 * register - 0.88422 * school  # LM approx 2021 - school + 18 + Residual(register)
+#         else:
+#             r = 1821.079 + 0.06561 * register - 0.82946 * school - 0.12747 * g5  # LM approx all available params
+#     r = max(14, r)
+#     r = min(89, r)
+#     return r
 
 
 def calc_group_als_vectorized(ids: np.array, groups: defaultdict) -> np.array:
     global user_embs_for_group_knn
     user_embs_for_group_knn = np.array([calc_user_embed_by_train_seq(
         filter_train_seq(groups[_id], train_groups_set), GROUP_ALS_DIM, train_group_2_emb) for _id in ids])
-    return group_knn.predict(user_embs_for_group_knn).reshape(-1)
+    return np.zeros(user_embs_for_group_knn.shape[0])
+    # return group_knn.predict(user_embs_for_group_knn).reshape(-1)
 
 def calc_friend_als_vectorized(ids: np.array, friends: defaultdict) -> np.array:
     global user_embs_for_friend_knn
     user_embs_for_friend_knn = np.array([calc_user_embed_by_train_seq(
         filter_train_seq(friends[_id], train_friends_set), FRIEND_ALS_DIM, train_friends_2_emb) for _id in ids])
-    return friend_knn.predict(user_embs_for_friend_knn).reshape(-1)
+    return np.zeros(user_embs_for_friend_knn.shape[0])
+    # return friend_knn.predict(user_embs_for_friend_knn).reshape(-1)
 
 def apply_cb_model_v1(ids: np.array, common_uids: np.array, features: np.array) -> np.array:
     approxes = edu_cb_model_v1.predict(features[:, CB_V1_FEATURE_SLICE])
@@ -269,21 +326,23 @@ def apply_cb_model_v1(ids: np.array, common_uids: np.array, features: np.array) 
     return np.array([uid2approx[u] for u in ids])
 
 def apply_cb_model_v2(ids: np.array, common_uids: np.array, features: np.array) -> np.array:
-    approxes = edu_cb_model_v2.predict(features[:, CB_V2_FEATURE_SLICE])
+    # approxes = edu_cb_model_v2.predict(features[:, CB_V2_FEATURE_SLICE])
+    approxes = np.zeros_like(common_uids)
     uid2approx = {u:a for u, a in zip(common_uids, approxes)}
     return np.array([uid2approx[u] for u in ids])
 
 def apply_cb_model_v3(ids: np.array, common_uids: np.array, features: np.array) -> np.array:
-    approxes = edu_cb_model_v3.predict(features[:, CB_V3_FEATURE_SLICE])
+    # approxes = edu_cb_model_v3.predict(features[:, CB_V3_FEATURE_SLICE])
+    approxes = np.zeros_like(common_uids)
     uid2approx = {u:a for u, a in zip(common_uids, approxes)}
     return np.array([uid2approx[u] for u in ids])
 
-def make_raw_predictions(ids: pd.DataFrame, education: pd.DataFrame, friends_df: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> pd.DataFrame:
+def make_raw_predictions(ids: pd.DataFrame, education: pd.DataFrame, friends_df: pd.DataFrame, groups_df: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> pd.DataFrame:
     result = pd.DataFrame()
     result['uid'] = ids['uid']
     result['group-als'] = calc_group_als_vectorized(ids['uid'].values, groups)
     result['friend-als'] = calc_friend_als_vectorized(ids['uid'].values, friends)
-    common_uids, cb_features_v3 = make_common_features_v3(ids, education, friends_df, groups, friends)  # requires both als embeddings ^
+    common_uids, cb_features_v3 = make_common_features_v3(ids, education, friends_df, groups_df, groups, friends)  # requires both als embeddings ^
     result['edu-cb-v1'] = apply_cb_model_v1(ids['uid'].values, common_uids, cb_features_v3)
     result['edu-cb-v2'] = apply_cb_model_v2(ids['uid'].values, common_uids, cb_features_v3)
     result['edu-cb-v3'] = apply_cb_model_v3(ids['uid'].values, common_uids, cb_features_v3)
@@ -302,7 +361,7 @@ def make_predictions(ids: pd.DataFrame, education: pd.DataFrame, groups: pd.Data
         friends_list[uid].append(fuid)
         friends_list[fuid].append(uid)
 
-    raw_predictions = make_raw_predictions(ids, education, friends, groups_list, friends_list)
+    raw_predictions = make_raw_predictions(ids, education, friends, groups, groups_list, friends_list)
     user_2_group_als_prediction = {uid: r for uid, r in zip(raw_predictions['uid'], raw_predictions['group-als'])}
     user_2_friend_als_prediction = {uid: r for uid, r in zip(raw_predictions['uid'], raw_predictions['friend-als'])}
     user_2_cb_v1_prediction = {uid: r for uid, r in zip(raw_predictions['uid'], raw_predictions['edu-cb-v1'])}
