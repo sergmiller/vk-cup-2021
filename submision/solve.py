@@ -13,19 +13,24 @@ from fast_pagerank import pagerank_power
 from scipy.sparse import csr_matrix
 
 
+
 GROUP_ALS_DIM = 32
 FRIEND_ALS_DIM = 16
+GEMBEDDINGS_DIM = 64
 ALS_TRAIN_GROUPS_TH = 1  # 5 is worse that 1
-GROUP_OVER_FRIEND_WEIGHT = 0.75
-ALS_OVER_NAIVE_WEIGHT = 0.5
+GROUP_OVER_FRIEND_WEIGHT = 0.5  # less is overfit
+ALS_OVER_NAIVE_WEIGHT = 0 # less is overfit
 # NAIVE_OVER_CB_WEIGHT = 0
 # FRIEND_ALS_OVER_CB_WEIGHT = 0
 FULL_ALS_OVER_CB_WEIGHT = 0.5
-FULL_ALS_OVER_BASE_WEIGHT = 1
+FULL_ALS_OVER_BASE_WEIGHT = 0
 
-CB_V1_FEATURE_SLICE = list(np.arange(8 + 8 + 2 + 1 + 16))
-CB_V2_FEATURE_SLICE = list(np.arange(8 + 8 + 2 + 1)) + list(np.arange(FRIEND_ALS_DIM) + 8 + 8 + 2 + 1 + 16)
-CB_V3_FEATURE_SLICE = CB_V2_FEATURE_SLICE + list(np.arange(GROUP_ALS_DIM) + 8 + 8 + 2 + 1 + 16  + FRIEND_ALS_DIM)
+COMMON_SLICE_LEN = 8 + 8 + 2 + 1 + 1
+FORBIDEN_TAIL_OF_COMMON_SLICE_LEN = 1
+CB_V1_FEATURE_SLICE = list(np.arange(COMMON_SLICE_LEN + GEMBEDDINGS_DIM))
+CB_V1_5_FEATURE_SLICE = CB_V1_FEATURE_SLICE + list(np.arange(FRIEND_ALS_DIM) + COMMON_SLICE_LEN + GEMBEDDINGS_DIM)
+CB_V2_FEATURE_SLICE = list(np.arange(COMMON_SLICE_LEN - FORBIDEN_TAIL_OF_COMMON_SLICE_LEN)) + list(np.arange(FRIEND_ALS_DIM) + COMMON_SLICE_LEN + GEMBEDDINGS_DIM)
+CB_V3_FEATURE_SLICE = CB_V2_FEATURE_SLICE + list(np.arange(GROUP_ALS_DIM) + COMMON_SLICE_LEN + GEMBEDDINGS_DIM + FRIEND_ALS_DIM)
   # + FRIEND_ALS_DIM # second friend_als_dim for firends mean user embedding
 
 
@@ -80,9 +85,35 @@ user_g_nodes = read_csv('data/graph_nodes_user_ids.csv').values
 gembeddings = read_csv('data/graph_embeddings.csv').values
 uid2gembeddding = {int(uid): gembeddings[i] for i, uid in enumerate(user_g_nodes)}
 
-edu_cb_model_v1 = catboost.CatBoost().load_model('data/edu_v1_g.cbm')
-edu_cb_model_v2 = catboost.CatBoost().load_model('data/edu_v2_2_10K.cbm')
-edu_cb_model_v3 = catboost.CatBoost().load_model('data/edu_v3_2_10K.cbm')
+edu_cb_model_v1 = catboost.CatBoost().load_model('data/edu_v1_g_y.cbm')
+edu_cb_model_v1_5 = catboost.CatBoost().load_model('data/edu_v1_5_g_y.cbm')
+edu_cb_model_v2 = catboost.CatBoost().load_model('data/edu_v2_g_10K.cbm')
+edu_cb_model_v3 = catboost.CatBoost().load_model('data/edu_v3_g_10K.cbm')
+
+assert len(CB_V1_FEATURE_SLICE) == len(edu_cb_model_v1.feature_names_)
+assert len(CB_V1_5_FEATURE_SLICE) == len(edu_cb_model_v1_5.feature_names_)
+assert len(CB_V2_FEATURE_SLICE) == len(edu_cb_model_v2.feature_names_)
+assert len(CB_V3_FEATURE_SLICE) == len(edu_cb_model_v3.feature_names_)
+
+
+class MultiheadCatboostModel:
+    def __init__(self, paths: list):
+        self.paths = paths
+        self.models = []
+        for p in self.paths:
+            m = catboost.CatBoost().load_model(p)
+            assert len(CB_V1_FEATURE_SLICE) == len(m.feature_names_)
+            self.models.append(m)
+    def predict(self, X: np.array):
+        y = np.empty((X.shape[0], len(self.models)))
+        for i, m in enumerate(self.models):
+            y[:, i] = m.predict(X)
+        return np.mean(y, axis=1)
+
+# MULTIMODEL_SIZE = 10
+# edu_cb_model_v1 = MultiheadCatboostModel(
+#     ["data/edu_v1_g_part_{}_of_{}.cbm".format(i+1, MULTIMODEL_SIZE) for i in range(MULTIMODEL_SIZE)]
+# )
 
 user_embs_for_friend_knn = None
 user_embs_for_group_knn = None
@@ -140,19 +171,21 @@ def decision(
     # base = naive * NAIVE_OVER_CB_WEIGHT + (1 - NAIVE_OVER_CB_WEIGHT) * cb_v1_prediction
     base = cb_v1_prediction
 
-    groups = filter_train_seq(groups, train_groups_set)
+    return base
+
+    # groups = filter_train_seq(groups, train_groups_set)
     # friends = filter_train_seq(friends, train_friends_set)
 
     # friend_als_prediction = friend_als_prediction * FRIEND_ALS_OVER_CB_WEIGHT + (1 - FRIEND_ALS_OVER_CB_WEIGHT) * cb_v2_prediction
 
-    if len(groups) < ALS_TRAIN_GROUPS_TH and len(friends) < ALS_TRAIN_GROUPS_TH:
-        return base
-    if len(groups) < ALS_TRAIN_GROUPS_TH:
-        return cb_v1_prediction * ALS_OVER_NAIVE_WEIGHT + (1 - ALS_OVER_NAIVE_WEIGHT) * base
-    full_als = group_als_prediction * GROUP_OVER_FRIEND_WEIGHT + (1 - GROUP_OVER_FRIEND_WEIGHT) * cb_v1_prediction
-    full_als = full_als * FULL_ALS_OVER_CB_WEIGHT + (1 -  FULL_ALS_OVER_CB_WEIGHT) * cb_v3_prediction
-    full_als = full_als * FULL_ALS_OVER_BASE_WEIGHT + (1 - FULL_ALS_OVER_BASE_WEIGHT) * base
-    return full_als
+    # if len(groups) < ALS_TRAIN_GROUPS_TH and len(friends) < ALS_TRAIN_GROUPS_TH:
+    #     return base  # v3 and group_als_prediction is overfit for this branch (why?)
+    # if len(groups) < ALS_TRAIN_GROUPS_TH:
+    #     return cb_v2_prediction * ALS_OVER_NAIVE_WEIGHT + (1 - ALS_OVER_NAIVE_WEIGHT) * base  # v1 is overfit for this branch (why?)
+    # full_als = group_als_prediction * GROUP_OVER_FRIEND_WEIGHT + (1 - GROUP_OVER_FRIEND_WEIGHT) * cb_v1_prediction
+    # full_als = full_als * FULL_ALS_OVER_CB_WEIGHT + (1 -  FULL_ALS_OVER_CB_WEIGHT) * cb_v3_prediction
+    # full_als = full_als * FULL_ALS_OVER_BASE_WEIGHT + (1 - FULL_ALS_OVER_BASE_WEIGHT) * base
+    # return full_als
 
 def get_als_friends_embed(uid: int) -> np.array:
     return user_embs_for_friend_knn[ids_order[uid]]
@@ -164,7 +197,7 @@ f_cache = {}
 def get_friends_mean_embed(uid: int, friends_list: list)-> np.array:
     if uid in f_cache:
         return f_cache[uid]
-    e = np.zeros(16)
+    e = np.zeros(FRIEND_ALS_DIM)
     count = 0
     for f in friends_list[uid]:
         m = friends_2_user_emb[f]
@@ -195,9 +228,9 @@ def make_common_features_v3(uids: pd.DataFrame, edu: pd.DataFrame, friends_df: p
         features.append(len(friends[uid]))
         features.append(len(groups[uid]))
         features.append(friends_pr[uid])
-        # features.append(register_year)
+        features.append(register_year)
         # features.append(decision_naive_impl(x['school_education'], register_year, x['graduation_5']))
-        f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(16))) + list(get_als_friends_embed(uid)) + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
+        f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(GEMBEDDINGS_DIM))) + list(get_als_friends_embed(uid)) + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
         edu_features.append(f)
     return edu_ids, np.array(edu_features)
 
