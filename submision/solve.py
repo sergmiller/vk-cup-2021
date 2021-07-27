@@ -25,13 +25,9 @@ ALS_OVER_NAIVE_WEIGHT = 0 # less is overfit
 FULL_ALS_OVER_CB_WEIGHT = 0.5
 FULL_ALS_OVER_BASE_WEIGHT = 0
 
-COMMON_SLICE_LEN = 8 + 8 + 2 + 1 + 2
-FORBIDEN_TAIL_OF_COMMON_SLICE_LEN = 2
+COMMON_SLICE_LEN = 8 + 8 + 2 + 1 + 5
+FORBIDEN_TAIL_OF_COMMON_SLICE_LEN = 5
 CB_V1_FEATURE_SLICE = list(np.arange(COMMON_SLICE_LEN + GEMBEDDINGS_DIM))
-CB_V1_5_FEATURE_SLICE = CB_V1_FEATURE_SLICE + list(np.arange(FRIEND_ALS_DIM) + COMMON_SLICE_LEN + GEMBEDDINGS_DIM)
-CB_V2_FEATURE_SLICE = list(np.arange(COMMON_SLICE_LEN - FORBIDEN_TAIL_OF_COMMON_SLICE_LEN)) + list(np.arange(FRIEND_ALS_DIM) + COMMON_SLICE_LEN + GEMBEDDINGS_DIM)
-CB_V3_FEATURE_SLICE = CB_V2_FEATURE_SLICE + list(np.arange(GROUP_ALS_DIM) + COMMON_SLICE_LEN + GEMBEDDINGS_DIM + FRIEND_ALS_DIM)
-  # + FRIEND_ALS_DIM # second friend_als_dim for firends mean user embedding
 
 
 ### SET VARIABLES
@@ -86,7 +82,9 @@ def load_mean(a: np.array) -> dict:
 
 
 g_mean = load_mean(read_csv('data/g_mean_p35_a10.csv').values)
-f_mean = load_mean(read_csv('data/f_mean.csv').values)
+g_reg_mean = load_mean(read_csv('data/g_reg_mean_p2014_a10.csv').values)
+f_mean = load_mean(read_csv('data/f_mean_p35_a10.csv').values)
+f_reg_mean = load_mean(read_csv('data/f_reg_mean_p2014_a10.csv').values)
 
 user_g_nodes = read_csv('data/graph_nodes_user_ids.csv').values
 gembeddings = read_csv('data/graph_embeddings.csv').values
@@ -95,15 +93,9 @@ gembeddings = read_csv('data/graph_embeddings.csv').values
 uid2gembeddding = {int(uid): gembeddings[i] for i, uid in enumerate(user_g_nodes)}
 # uid2meta_pseudo = {int(uid): meta_pseudo[i] for i, uid in enumerate(user_g_nodes)}
 
-edu_cb_model_v1 = catboost.CatBoost().load_model('data/edu_v1_g_y_mmg_p35_a10.cbm')
-# edu_cb_model_v1_5 = catboost.CatBoost().load_model('data/edu_v1_5_g_y.cbm')
-edu_cb_model_v2 = catboost.CatBoost().load_model('data/edu_v2_g_10K.cbm')
-edu_cb_model_v3 = catboost.CatBoost().load_model('data/edu_v3_g_10K.cbm')
-
+edu_cb_model_v1 = catboost.CatBoost().load_model('data/edu_v1_g_y_mmg_mmf_mmgreg_mmfreg_p35_a10.cbm')
 assert len(CB_V1_FEATURE_SLICE) == len(edu_cb_model_v1.feature_names_)
 # assert len(CB_V1_5_FEATURE_SLICE) == len(edu_cb_model_v1_5.feature_names_)
-assert len(CB_V2_FEATURE_SLICE) == len(edu_cb_model_v2.feature_names_)
-assert len(CB_V3_FEATURE_SLICE) == len(edu_cb_model_v3.feature_names_)
 
 
 class MultiheadCatboostModel:
@@ -122,13 +114,13 @@ class MultiheadCatboostModel:
 
 # MULTIMODEL_SIZE = 10
 # edu_cb_model_v1 = MultiheadCatboostModel(
-#     ["data/edu_v1_g_part_{}_of_{}.cbm".format(i+1, MULTIMODEL_SIZE) for i in range(MULTIMODEL_SIZE)]
+#     ["data/edu_v1_g_y_mmg_mmf_mmgreg_p35_a10_part_{}_of_{}.cbm".format(i+1, MULTIMODEL_SIZE) for i in range(MULTIMODEL_SIZE)]
 # )
-
-user_embs_for_friend_knn = None
-user_embs_for_group_knn = None
-ids_order = None
-uid2mmg = None
+#
+# user_embs_for_friend_knn = None
+# user_embs_for_group_knn = None
+# ids_order = None
+# uid2mmg = None
 
 
 
@@ -264,6 +256,8 @@ def make_common_features_v3(
 
     uid2mmg = calc_mean_of_mean_of_groups(uids, groups_df, g_mean)
     uid2mmf = calc_mean_of_mean_of_friends(uids, friends_df, f_mean)
+    uid2mmg_reg = calc_mean_of_mean_of_groups(uids, groups_df, g_reg_mean)
+    uid2mmf_reg = calc_mean_of_mean_of_friends(uids, friends_df, f_reg_mean)
     for x in edu.iterrows():
         x = x[1]
         uid = int(x['uid'])
@@ -282,10 +276,12 @@ def make_common_features_v3(
 
         features.append(register_year)
         features.append(uid2mmg.get(uid, 35))
-        # features.append(uid2mmf.get(uid, 35))
+        features.append(uid2mmf.get(uid, 35))
+        features.append(uid2mmg_reg.get(uid, 2014))
+        features.append(uid2mmf_reg.get(uid, 2014))
         # features.append(uid2meta_pseudo.get(uid, 0))
         # features.append(decision_naive_impl(x['school_education'], register_year, x['graduation_5']))
-        f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(GEMBEDDINGS_DIM))) + list(get_als_friends_embed(uid)) + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
+        f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(GEMBEDDINGS_DIM)))  # + list(get_als_friends_embed(uid)) + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
         edu_features.append(f)
     return edu_ids, np.array(edu_features)
 
