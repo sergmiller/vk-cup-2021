@@ -18,18 +18,14 @@ GROUP_ALS_DIM = 32
 FRIEND_ALS_DIM = 16
 GEMBEDDINGS_DIM = 64
 
-DEFAULT_GROUP_ALS_ITEM_EMB = np.array([0.00244036, 0.00203669, 0.00181023, 0.00288724, 0.00168105,
-       0.00253628, 0.0019611 , 0.00245336, 0.00279846, 0.00175673,
-       0.00231933, 0.00180845, 0.00269746, 0.00226039, 0.00224252,
-       0.00202341, 0.00218132, 0.00209919, 0.00211487, 0.00196292,
-       0.00131669, 0.00241805, 0.00255356, 0.0026769 , 0.00232002,
-       0.00262157, 0.00175571, 0.00160803, 0.00271791, 0.0023224 ,
-       0.00258682, 0.0021744 ])
+# DEFAULT_GROUP_ALS_ITEM_EMB = np.array([0.00244036, 0.00203669, 0.00181023, 0.00288724, 0.00168105,
+#        0.00253628, 0.0019611 , 0.00245336, 0.00279846, 0.00175673,
+#        0.00231933, 0.00180845, 0.00269746, 0.00226039, 0.00224252,
+#        0.00202341, 0.00218132, 0.00209919, 0.00211487, 0.00196292,
+#        0.00131669, 0.00241805, 0.00255356, 0.0026769 , 0.00232002,
+#        0.00262157, 0.00175571, 0.00160803, 0.00271791, 0.0023224 ,
+#        0.00258682, 0.0021744 ])
 
-DEFAULT_FRIEND_ALS_ITEM_EMB = np.array([0.00207183, 0.00355059, 0.00283433, 0.00150549, 0.00308064,
-       0.00168812, 0.00260866, 0.00268273, 0.00192601, 0.00249572,
-       0.00152326, 0.00334434, 0.00246569, 0.00300442, 0.00339367,
-       0.00160724])
 
 COMMON_SLICE_LEN = 8 + 8 + 2 + 1 + 7
 CB_V1_FEATURE_SLICE = list(np.arange(COMMON_SLICE_LEN + GEMBEDDINGS_DIM + FRIEND_ALS_DIM))# + GROUP_ALS_DIM))
@@ -65,9 +61,6 @@ train_groups = read_csv('data/train_groups.csv').values.reshape(-1)
 train_groups_set = set(list(train_groups))
 assert len(train_groups) == len(train_als_group_embeddings)
 train_group_2_emb = {g: e for g,e in zip(train_groups, train_als_group_embeddings)}
-# print(len(train_group_2_emb), len( train_als_group_embeddings), len(train_groups))
-group_knn = KNeighborsRegressor(weights='distance', n_neighbors=25)
-group_knn.fit(train_als_user_embeddings, train_uids['age'].values)
 
 friend_als_user_embeddings = read_csv('data/friends_als_user_embeddings.csv').values
 train_friend_als_user_embeddings = read_csv('data/train_friends_als_user_embeddings.csv').values
@@ -85,8 +78,6 @@ assert len(train_friends) == len(train_friend_als_friend_embeddings)
 train_friends_2_emb = {g: e for g,e in zip(train_friends, train_friend_als_friend_embeddings)}
 assert len(train_friends) == len(friend_als_user_embeddings)
 friends_2_user_emb = {g: e for g,e in zip(train_friends, friend_als_user_embeddings)}
-friend_knn = KNeighborsRegressor(weights='distance', n_neighbors=25)
-friend_knn.fit(train_friend_als_user_embeddings, train_uids['age'].values)
 
 def load_mean(a: np.array) -> dict:
     return {x:y for x,y in a}
@@ -101,6 +92,7 @@ f_reg_mean = load_mean(read_csv('data/f_reg_mean_p2014_a10.csv').values)
 
 user_g_nodes = read_csv('data/graph_nodes_user_ids.csv').values
 gembeddings = read_csv('data/graph_embeddings.csv').values
+train_f2u_w1_svd_16 = read_csv("data/train_f2u_w1_svd_16.csv").values
 
 uid2gembeddding = {int(uid): gembeddings[i] for i, uid in enumerate(user_g_nodes)}
 
@@ -118,7 +110,7 @@ class MultiheadCatboostModel:
             y[:, i] = m.predict(X)
         return np.mean(y, axis=1)
 
-MULTIMODEL_SIZE = 50
+MULTIMODEL_SIZE = 200
 edu_cb_model_v1 = MultiheadCatboostModel(
     ["data/edu_v1_g_y_mmg_mmf_mmgreg_mmfreg_p35_a10_part_bins32_v2_{}_of_{}.cbm".format(i+1, MULTIMODEL_SIZE) for i in range(MULTIMODEL_SIZE)]
 )
@@ -274,17 +266,18 @@ def make_common_features_v3(
         features.append(uid2mmf_reg.get(uid, 2014))
         # features.append(uid2meta_pseudo.get(uid, 0))
         # features.append(decision_naive_impl(x['school_education'], register_year, x['graduation_5']))
-        f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(GEMBEDDINGS_DIM)))  + list(get_als_friends_embed(uid))  # + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
+        f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(GEMBEDDINGS_DIM))) + list(get_als_friends_embed(uid))# + list(train_f2u_w1_svd_16[uid])
+        # + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
         edu_features.append(f)
     return edu_ids, np.array(edu_features)
 
-def calc_group_als_vectorized(ids: np.array, groups: defaultdict) -> np.array:
-    global user_embs_for_group_knn
-    user_embs_for_group_knn = np.array([calc_user_embed_by_train_seq(
-        filter_train_seq(groups[_id], train_groups_set),
-        GROUP_ALS_DIM,
-        train_group_2_emb,
-        DEFAULT_GROUP_ALS_ITEM_EMB) for _id in ids])
+# def calc_group_als_vectorized(ids: np.array, groups: defaultdict) -> np.array:
+#     global user_embs_for_group_knn
+#     user_embs_for_group_knn = np.array([calc_user_embed_by_train_seq(
+#         filter_train_seq(groups[_id], train_groups_set),
+#         GROUP_ALS_DIM,
+#         train_group_2_emb,
+#         DEFAULT_GROUP_ALS_ITEM_EMB) for _id in ids])
     # print(ids.shape,user_embs_for_group_knn.shape, len(user_embs_for_group_knn), len(ids_order))
     # return np.zeros(user_embs_for_group_knn.shape[0])
     # return group_knn.predict(user_embs_for_group_knn).reshape(-1)
@@ -304,8 +297,7 @@ def apply_cb_model_v1(ids: np.array, common_uids: np.array, features: np.array) 
 def make_raw_predictions(ids: pd.DataFrame, education: pd.DataFrame, friends_df: pd.DataFrame, groups_df: pd.DataFrame, groups: defaultdict, friends: defaultdict) -> pd.DataFrame:
     result = pd.DataFrame()
     result['uid'] = ids['uid']
-    calc_group_als_vectorized(ids['uid'].values, groups)
-    common_uids, cb_features_v3 = make_common_features_v3(ids, education, friends_df, groups_df, groups, friends)  # requires friend als embeddings ^
+    common_uids, cb_features_v3 = make_common_features_v3(ids, education, friends_df, groups_df, groups, friends)
     result['edu-cb-v1'] = apply_cb_model_v1(ids['uid'].values, common_uids, cb_features_v3)
     assert result.shape[0] == ids.shape[0] and result.shape[1] == 2
     assert ['uid', 'edu-cb-v1'] == list(result.columns)
