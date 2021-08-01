@@ -110,7 +110,7 @@ class MultiheadCatboostModel:
             y[:, i] = m.predict(X)
         return np.mean(y, axis=1)
 
-MULTIMODEL_SIZE = 200
+MULTIMODEL_SIZE = 50
 edu_cb_model_v1 = MultiheadCatboostModel(
     ["data/edu_v1_g_y_mmg_mmf_mmgreg_mmfreg_p35_a10_part_bins32_v2_{}_of_{}.cbm".format(i+1, MULTIMODEL_SIZE) for i in range(MULTIMODEL_SIZE)]
 )
