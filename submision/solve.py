@@ -31,7 +31,7 @@ DEFAULT_FRIEND_ALS_ITEM_EMB = np.array([0.00207183, 0.00355059, 0.00283433, 0.00
        0.00152326, 0.00334434, 0.00246569, 0.00300442, 0.00339367,
        0.00160724])
 
-COMMON_SLICE_LEN = 8 + 8 + 2 + 1 + 5
+COMMON_SLICE_LEN = 8 + 8 + 2 + 1 + 7
 CB_V1_FEATURE_SLICE = list(np.arange(COMMON_SLICE_LEN + GEMBEDDINGS_DIM + FRIEND_ALS_DIM))# + GROUP_ALS_DIM))
 
 
@@ -91,6 +91,9 @@ friend_knn.fit(train_friend_als_user_embeddings, train_uids['age'].values)
 def load_mean(a: np.array) -> dict:
     return {x:y for x,y in a}
 
+f_min = load_mean(read_csv('data/f_min_p35.csv').values)
+f_max = load_mean(read_csv('data/f_max_p35.csv').values)
+f_med = load_mean(read_csv('data/f_med_p35.csv').values)
 g_mean = load_mean(read_csv('data/g_mean_p35_a10.csv').values)
 g_reg_mean = load_mean(read_csv('data/g_reg_mean_p2014_a10.csv').values)
 f_mean = load_mean(read_csv('data/f_mean_p35_a10.csv').values)
@@ -115,10 +118,13 @@ class MultiheadCatboostModel:
             y[:, i] = m.predict(X)
         return np.mean(y, axis=1)
 
-MULTIMODEL_SIZE = 10
+MULTIMODEL_SIZE = 50
 edu_cb_model_v1 = MultiheadCatboostModel(
     ["data/edu_v1_g_y_mmg_mmf_mmgreg_mmfreg_p35_a10_part_bins32_v2_{}_of_{}.cbm".format(i+1, MULTIMODEL_SIZE) for i in range(MULTIMODEL_SIZE)]
 )
+
+# edu_cb_model_v1 = catboost.CatBoost().load_model("data/edu_v1_g_y_mmg_mmf_mmgreg_mmfreg_p35_a10_bins32_v2.cbm")
+# assert len(CB_V1_FEATURE_SLICE) == len(edu_cb_model_v1.feature_names_)
 #
 # user_embs_for_friend_knn = None
 user_embs_for_group_knn = None
@@ -258,13 +264,17 @@ def make_common_features_v3(
         features.append(friends_pr[uid])
 
         features.append(register_year)
+        features.append(f_min.get(uid, 35))
+        features.append(f_max.get(uid, 35))
+        # features.append(f_med.get(uid, 35))
+        # features.append(f_reg_mean.get(uid, 2014))
         features.append(uid2mmg.get(uid, 35))
         features.append(uid2mmf.get(uid, 35))
         features.append(uid2mmg_reg.get(uid, 2014))
         features.append(uid2mmf_reg.get(uid, 2014))
         # features.append(uid2meta_pseudo.get(uid, 0))
         # features.append(decision_naive_impl(x['school_education'], register_year, x['graduation_5']))
-        f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(GEMBEDDINGS_DIM))) + list(get_als_friends_embed(uid)) + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
+        f = features_ind + features + list(uid2gembeddding.get(uid, np.zeros(GEMBEDDINGS_DIM)))  + list(get_als_friends_embed(uid))  # + list(get_als_group_embed(uid))  # + list(get_friends_mean_embed(uid, friends))
         edu_features.append(f)
     return edu_ids, np.array(edu_features)
 
